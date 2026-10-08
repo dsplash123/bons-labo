@@ -114,6 +114,15 @@ label.f{display:flex; flex-direction:column; gap:4px; font-size:12.5px; font-wei
 .shade{font-family:var(--f-mono); font-size:12.5px; font-weight:500; min-width:52px; min-height:36px; border-radius:7px; border:1px solid rgba(0,0,0,.12); color:#2a2118; cursor:pointer; padding:0 6px}
 .shade.sel{outline:2.5px solid var(--ink); outline-offset:1px; font-weight:700}
 
+.vh{position:absolute; width:1px; height:1px; opacity:0; pointer-events:none}
+.addph{display:inline-flex; align-items:center; margin-top:4px}
+.photos{display:grid; grid-template-columns:repeat(auto-fill,minmax(150px,1fr)); gap:10px; margin-bottom:10px}
+.photos:empty{display:none}
+.ph{border:1px solid var(--line); border-radius:8px; background:var(--bg); overflow:hidden; display:flex; flex-direction:column; min-width:0}
+.ph img{width:100%; aspect-ratio:4/3; object-fit:cover; display:block; background:var(--sunk)}
+.ph .pb{padding:6px; display:flex; flex-direction:column; gap:6px}
+.ph input{border:1px solid var(--line); background:var(--surface); border-radius:6px; padding:6px 8px; font-size:15px; width:100%; min-width:0}
+.ph button{border:0; background:none; color:var(--muted); font-size:13px; cursor:pointer; text-align:left; padding:0}
 textarea#notes{min-height:150px; resize:vertical; line-height:1.5}
 .hint{font-size:12.5px; color:var(--muted); margin-top:6px}
 
@@ -206,6 +215,11 @@ h3{font-size:13px; text-transform:uppercase; letter-spacing:.07em; color:var(--m
         <select id="moignon"><option value="">Non précisée</option></select>
       </label>
     </div>
+    <h3>Photos de teinte</h3>
+    <div class="photos" id="photos"></div>
+    <label class="btn addph" for="photoIn">Ajouter des photos</label>
+    <input id="photoIn" type="file" accept="image/*" multiple class="vh">
+    <p class="hint">Prenez la photo avec l'onglet du teintier placé à côté de la dent, au même plan. Les photos sont intégrées au PDF et jointes en pleine résolution à l'envoi. Elles ne sont pas conservées dans les brouillons ni l'historique.</p>
   </section>
 
   <section class="card" aria-labelledby="h-no">
@@ -421,8 +435,38 @@ $('#btnNew').addEventListener('click',()=>{
     setTimeout(()=>{ delete $('#btnNew').dataset.armed; $('#btnNew').textContent='Nouveau bon'; },4000); return;
   }
   delete $('#btnNew').dataset.armed; $('#btnNew').textContent='Nouveau bon';
-  const keepLab=S.lab; S=blank(); S.lab=keepLab; save(); fillForm(); status(''); window.scrollTo({top:0});
+  const keepLab=S.lab; S=blank(); S.lab=keepLab; save(); photos=[]; renderPhotos(); fillForm(); status(''); window.scrollTo({top:0});
 });
+
+/* ---------- Photos de teinte (en mémoire uniquement) ---------- */
+let photos=[];
+async function prepPhoto(file){
+  const url=URL.createObjectURL(file);
+  try{
+    const img=await new Promise((res,rej)=>{ const i=new Image(); i.onload=()=>res(i); i.onerror=rej; i.src=url; });
+    const max=1800, k=Math.min(1, max/Math.max(img.naturalWidth,img.naturalHeight));
+    const c=document.createElement('canvas'); c.width=Math.round(img.naturalWidth*k); c.height=Math.round(img.naturalHeight*k);
+    c.getContext('2d').drawImage(img,0,0,c.width,c.height);
+    return {id:Date.now()+Math.random(), file, data:c.toDataURL('image/jpeg',0.9), w:c.width, h:c.height, caption:''};
+  } finally { URL.revokeObjectURL(url); }
+}
+function renderPhotos(){
+  $('#photos').innerHTML=photos.map((p,i)=>`<div class="ph" data-i="${i}"><img src="${p.data}" alt="Photo de teinte ${i+1}">
+    <div class="pb"><input data-cap placeholder="Légende (ex. 11-21, onglet 2M2)" value="${esc(p.caption)}" autocomplete="off"><button type="button" data-phrm>Retirer</button></div></div>`).join('');
+}
+$('#photoIn').addEventListener('change', async e=>{
+  const files=[...e.target.files]; e.target.value='';
+  if(!files.length) return;
+  status('Préparation des photos…');
+  for(const f of files){ try{ photos.push(await prepPhoto(f)); }catch(err){ status('Une photo n\'a pas pu être lue (format non pris en charge).','err'); } }
+  renderPhotos(); if(!$('#status').classList.contains('err')) status(`${photos.length} photo${photos.length>1?'s':''} de teinte prête${photos.length>1?'s':''}.`,'ok');
+});
+$('#photos').addEventListener('input',e=>{ if(e.target.matches('[data-cap]')) photos[+e.target.closest('.ph').dataset.i].caption=e.target.value; });
+$('#photos').addEventListener('click',e=>{ if(e.target.matches('[data-phrm]')){ photos.splice(+e.target.closest('.ph').dataset.i,1); renderPhotos(); } });
+function photoFiles(){
+  const n=S.nom.trim().normalize('NFD').replace(/[̀-ͯ]/g,'').replace(/[^A-Za-z0-9]+/g,'_')||'patient';
+  return photos.map((p,i)=>{ const ext=(p.file.name.split('.').pop()||'jpg').toLowerCase(); return new File([p.file], `Teinte_${n}_${i+1}.${ext}`, {type:p.file.type||'image/jpeg'}); });
+}
 
 /* ---------- Réglages ---------- */
 function openOv(id){ $(id).hidden=false; }
@@ -461,7 +505,7 @@ function logHist(){
 /* ---------- Contenu texte ---------- */
 function subject(){ return `Bon de commande - ${patient()||'patient'}${S.date?' - retour souhaité le '+fmtDate(S.date):''}`; }
 function shortBody(){
-  return `Bonjour,\n\nVeuillez trouver ci-joint le bon de commande pour ${patient()||'le patient'}${S.date?', avec un retour souhaité le '+fmtDate(S.date):''} (étape : ${S.etape.toLowerCase()}).\n\nBien cordialement,\n${cab.praticien}\n${cab.cabinet}${cab.tel?'\n'+cab.tel:''}`;
+  return `Bonjour,\n\nVeuillez trouver ci-joint le bon de commande pour ${patient()||'le patient'}${S.date?', avec un retour souhaité le '+fmtDate(S.date):''} (étape : ${S.etape.toLowerCase()})${photos.length?`, ainsi que ${photos.length} photo${photos.length>1?'s':''} de teinte en pleine résolution`:''}.\n\nBien cordialement,\n${cab.praticien}\n${cab.cabinet}${cab.tel?'\n'+cab.tel:''}`;
 }
 function fullText(){
   const L=[];
@@ -559,6 +603,22 @@ function buildPdf(){
   ensure(12); tz.forEach((z,i)=>{ const x=M+i*(CW/4); label(z[0],x,y); doc.setFont('helvetica','bold'); doc.setFontSize(13); doc.setTextColor(...INK); doc.text(z[1]||'-', x, y+6); });
   y+=11;
 
+  // Photos de teinte
+  if(photos.length){
+    section('Photos de teinte');
+    const pw=(CW-6)/2, maxH=95;
+    for(let i=0;i<photos.length;i+=2){
+      const pair=photos.slice(i,i+2).map(p=>{ let w=pw, h=pw*p.h/p.w; if(h>maxH){ h=maxH; w=maxH*p.w/p.h; } return {p,w,h}; });
+      const rowH=Math.max(...pair.map(o=>o.h))+(pair.some(o=>o.p.caption)?6:2);
+      ensure(rowH+2);
+      pair.forEach((o,j)=>{ const x=M+j*(pw+6);
+        doc.addImage(o.p.data,'JPEG',x,y,o.w,o.h);
+        if(o.p.caption){ doc.setFont('helvetica','normal'); doc.setFontSize(8.5); doc.setTextColor(...MUTE); doc.text(doc.splitTextToSize(o.p.caption,pw)[0], x, y+o.h+4); }
+      });
+      y+=rowH+3;
+    }
+  }
+
   // Notes
   if(S.notes.trim()){
     section('Notes du praticien');
@@ -579,9 +639,11 @@ $('#btnShare').addEventListener('click', async ()=>{
   if(!validate()||!pdfReady()) return;
   const blob=buildPdf().output('blob');
   const file=new File([blob], fileName(), {type:'application/pdf'});
-  if(navigator.canShare && navigator.canShare({files:[file]})){
+  let files=[file, ...photoFiles()];
+  if(navigator.canShare && files.length>1 && !navigator.canShare({files})) files=[file];
+  if(navigator.canShare && navigator.canShare({files})){
     try{
-      await navigator.share({files:[file], title:subject(), text:shortBody()});
+      await navigator.share({files, title:subject(), text:shortBody()});
       logHist(); status(`Partagé. Pensez à saisir ${lab().email} comme destinataire si Mail ne l'a pas proposé.`,'ok');
     }catch(e){ if(e.name!=='AbortError') status('Le partage a échoué. Utilisez « Télécharger le PDF ».','err'); }
   } else {
