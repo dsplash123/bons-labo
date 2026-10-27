@@ -142,6 +142,14 @@ textarea#notes{min-height:150px; resize:vertical; line-height:1.5}
 .lablist,.hist{display:flex; flex-direction:column; gap:8px; margin-bottom:14px}
 .labrow{display:grid; grid-template-columns:1fr 1fr auto; gap:8px; align-items:end}
 @media (max-width:520px){ .labrow{grid-template-columns:1fr} }
+.dictrow{display:grid; grid-template-columns:1fr auto 1fr auto; gap:8px; align-items:center}
+.dictrow input{border:1px solid var(--line); background:var(--bg); border-radius:8px; padding:8px 9px; font-size:16px; width:100%; min-width:0}
+.dictrow .arr{color:var(--muted)}
+.dictrow button{border:0; background:none; color:var(--danger); font-size:13px; cursor:pointer; padding:4px}
+.notetools{display:flex; gap:8px; flex-wrap:wrap; margin-top:8px}
+.learn{display:grid; grid-template-columns:1fr 1fr; gap:8px; margin-top:10px; padding:10px; border-radius:8px; background:var(--accent-soft)}
+.learn .learnbtns{grid-column:1/-1; display:flex; gap:8px}
+@media (max-width:520px){ .learn{grid-template-columns:1fr} }
 .hrow{display:flex; gap:10px; align-items:center; justify-content:space-between; border:1px solid var(--line); border-radius:8px; padding:10px; flex-wrap:wrap}
 .hrow div{min-width:0}
 .hrow .meta{font-size:12.5px; color:var(--muted)}
@@ -226,7 +234,16 @@ h3{font-size:13px; text-transform:uppercase; letter-spacing:.07em; color:var(--m
     <h2 id="h-no">Notes pour le prothésiste</h2>
     <p class="sub">Caractérisation, forme, contacts, occlusion, état de surface…</p>
     <label class="f" for="notes" style="display:block"><textarea id="notes" placeholder="Ex. : 21 – translucidité incisale marquée, légers mamelons, état de surface proche de la 11."></textarea></label>
-    <p class="hint">Sur iPhone, touchez le micro du clavier pour dicter directement dans ce champ.</p>
+    <div class="notetools">
+      <button class="btn small" id="btnFix" type="button">Corriger la dictée</button>
+      <button class="btn small" id="btnLearn" type="button">Apprendre une correction</button>
+    </div>
+    <div class="learn" id="learn" hidden>
+      <label class="f">Mot mal compris<input id="lFrom" autocomplete="off" autocapitalize="off" autocorrect="off" placeholder="vinyl lait"></label>
+      <label class="f">À remplacer par<input id="lTo" autocomplete="off" autocapitalize="off" autocorrect="off" placeholder="veneerlay"></label>
+      <div class="learnbtns"><button class="btn small primary" id="lAdd" type="button">Ajouter et corriger</button><button class="btn small ghost" id="lCancel" type="button">Annuler</button></div>
+    </div>
+    <p class="hint">Dictez avec le micro du clavier. Les corrections du dictionnaire s'appliquent quand vous quittez le champ. Pour en ajouter une, sélectionnez le mot mal compris puis touchez « Apprendre une correction ».</p>
   </section>
 </div>
 
@@ -248,6 +265,10 @@ h3{font-size:13px; text-transform:uppercase; letter-spacing:.07em; color:var(--m
     <h3>Laboratoires partenaires</h3>
     <div class="lablist" id="labList"></div>
     <button class="btn small" id="addLab" type="button">Ajouter un laboratoire</button>
+    <h3>Dictionnaire de corrections</h3>
+    <p class="sub">Ce que la dictée entend, et ce qu'il faut écrire à la place. Les majuscules ne comptent pas, seuls les mots entiers sont remplacés.</p>
+    <div class="lablist" id="dictList"></div>
+    <button class="btn small" id="addDict" type="button">Ajouter une correction</button>
     <h3>Praticien et cabinet (en-tête du bon)</h3>
     <div class="grid" id="cabFields"></div>
   </div>
@@ -468,10 +489,79 @@ function photoFiles(){
   return photos.map((p,i)=>{ const ext=(p.file.name.split('.').pop()||'jpg').toLowerCase(); return new File([p.file], `Teinte_${n}_${i+1}.${ext}`, {type:p.file.type||'image/jpeg'}); });
 }
 
+/* ---------- Dictionnaire de corrections (local) ---------- */
+const DEFAULT_DICT=[
+  {from:'vinyl lait', to:'veneerlay'}, {from:'vinyle lait', to:'veneerlay'}, {from:'vénère lait', to:'veneerlay'},
+  {from:'over lay', to:'overlay'}, {from:'on lay', to:'onlay'}, {from:'in lay', to:'inlay'},
+  {from:'e max', to:'e.max'}, {from:'emax', to:'e.max'}, {from:'zircon', to:'zircone'},
+  {from:'canti lever', to:'cantilever'}
+];
+let dict=store.get('dict', DEFAULT_DICT);
+const saveDict=()=>store.set('dict', dict);
+const escRe=s=>s.replace(/[.*+?^${}()|[\]\\]/g,'\\$&');
+function applyDict(text){
+  let n=0; if(!text) return {text, n};
+  const rules=dict.filter(r=>r.from&&r.from.trim()&&r.to&&r.to.trim()).sort((a,b)=>b.from.length-a.from.length);
+  for(const r of rules){
+    const pat=r.from.trim().split(/\s+/).map(escRe).join('\\s+');
+    let re; try{ re=new RegExp('(^|[^\\p{L}\\p{N}])('+pat+')(?=$|[^\\p{L}\\p{N}])','giu'); }catch(e){ continue; }
+    text=text.replace(re,(m,pre,w)=>{ n++; let out=r.to.trim(); if(/^\p{Lu}/u.test(w) && /^\p{Ll}/u.test(out)) out=out[0].toUpperCase()+out.slice(1); return pre+out; });
+  }
+  return {text, n};
+}
+function fixNotes(){
+  const r=applyDict($('#notes').value);
+  if(r.n){ $('#notes').value=r.text; S.notes=r.text; save(); }
+  return r.n;
+}
+function fixPrecs(){
+  let n=0;
+  for(const t of Object.keys(S.teeth)){ const r=applyDict(S.teeth[t].prec||''); if(r.n){ S.teeth[t].prec=r.text; n+=r.n; } }
+  if(n){ save(); renderEls(); }
+  return n;
+}
+const plural=n=>`${n} correction${n>1?'s':''} appliquée${n>1?'s':''}`;
+let lastSel='';
+$('#notes').addEventListener('blur',()=>{
+  const ta=$('#notes'); lastSel=ta.value.slice(ta.selectionStart, ta.selectionEnd);
+  const n=fixNotes(); if(n) status(plural(n)+' à la note.','ok');
+});
+$('#els').addEventListener('focusout',e=>{
+  if(!e.target.matches('[data-k="prec"]')) return;
+  const r=applyDict(e.target.value); if(!r.n) return;
+  const t=e.target.closest('.el').dataset.t; e.target.value=r.text; S.teeth[t].prec=r.text; save(); status(plural(r.n)+'.','ok');
+});
+$('#btnFix').addEventListener('click',()=>{ const n=fixNotes()+fixPrecs(); status(n?plural(n)+'.':'Aucune correction à appliquer.', n?'ok':''); });
+$('#btnLearn').addEventListener('click',()=>{
+  $('#learn').hidden=false; $('#lFrom').value=lastSel.trim(); $('#lTo').value=''; lastSel='';
+  ($('#lFrom').value?$('#lTo'):$('#lFrom')).focus();
+});
+$('#lCancel').addEventListener('click',()=>{ $('#learn').hidden=true; });
+$('#lAdd').addEventListener('click',()=>{
+  const from=$('#lFrom').value.trim(), to=$('#lTo').value.trim();
+  if(!from||!to){ status('Indiquez le mot mal compris et sa correction.','err'); return; }
+  const ex=dict.find(r=>r.from.trim().toLowerCase()===from.toLowerCase());
+  if(ex) ex.to=to; else dict.push({from,to});
+  saveDict(); $('#learn').hidden=true;
+  const n=fixNotes()+fixPrecs();
+  status(`Correction « ${from} → ${to} » ajoutée au dictionnaire${n?' ('+plural(n)+')':''}.`,'ok');
+});
+function renderDict(){
+  $('#dictList').innerHTML=dict.length?dict.map((r,i)=>`<div class="dictrow" data-i="${i}">
+     <input data-dk="from" value="${esc(r.from)}" placeholder="Entendu" aria-label="Entendu" autocapitalize="off" autocorrect="off">
+     <span class="arr">→</span>
+     <input data-dk="to" value="${esc(r.to)}" placeholder="Corrigé" aria-label="Corrigé" autocapitalize="off" autocorrect="off">
+     <button type="button" data-ddel="${i}" aria-label="Supprimer">Supprimer</button></div>`).join('')
+   :'<div class="empty">Aucune correction pour l\'instant.</div>';
+}
+$('#dictList').addEventListener('input',e=>{ const k=e.target.dataset.dk; if(!k) return; dict[+e.target.closest('.dictrow').dataset.i][k]=e.target.value; saveDict(); });
+$('#dictList').addEventListener('click',e=>{ const d=e.target.closest('[data-ddel]'); if(!d) return; dict.splice(+d.dataset.ddel,1); saveDict(); renderDict(); });
+$('#addDict').addEventListener('click',()=>{ dict.unshift({from:'',to:''}); saveDict(); renderDict(); $('#dictList input').focus(); });
+
 /* ---------- Réglages ---------- */
 function openOv(id){ $(id).hidden=false; }
 document.querySelectorAll('.overlay').forEach(o=>o.addEventListener('click',e=>{ if(e.target===o||e.target.closest('[data-close]')) o.hidden=true; }));
-$('#btnSettings').addEventListener('click',()=>{ renderSettings(); openOv('#ovSettings'); });
+$('#btnSettings').addEventListener('click',()=>{ renderSettings(); renderDict(); openOv('#ovSettings'); });
 function renderSettings(){
   $('#labList').innerHTML=labs.map((l,i)=>`<div class="labrow" data-i="${i}">
      <label class="f">Nom<input data-k="name" value="${esc(l.name)}"></label>
@@ -521,6 +611,7 @@ function fullText(){
   return L.filter((l,i,a)=>l!==undefined).join('\n').replace(/\n{3,}/g,'\n\n').trim();
 }
 function validate(){
+  fixNotes(); fixPrecs();
   if(!S.nom.trim()){ status('Indiquez le nom du patient.','err'); $('#nom').focus(); return false; }
   if(!lab().email){ status('Ce laboratoire n\'a pas d\'adresse email. Ajoutez-la dans Réglages.','err'); return false; }
   if(!orderedTeeth().length && !S.notes.trim()){ status('Ajoutez au moins un élément sur le schéma ou une note.','err'); return false; }
