@@ -146,6 +146,19 @@ textarea#notes{min-height:150px; resize:vertical; line-height:1.5}
 .dictrow input{border:1px solid var(--line); background:var(--bg); border-radius:8px; padding:8px 9px; font-size:16px; width:100%; min-width:0}
 .dictrow .arr{color:var(--muted)}
 .dictrow button{border:0; background:none; color:var(--danger); font-size:13px; cursor:pointer; padding:4px}
+.voice{display:flex; align-items:center; gap:12px; margin-top:10px; flex-wrap:wrap}
+.rec{display:inline-flex; align-items:center; gap:8px}
+.rec .dot{width:11px; height:11px; border-radius:50%; background:var(--danger); flex:none}
+.rec[aria-pressed="true"]{border-color:var(--danger); color:var(--danger); font-weight:600}
+.rec[aria-pressed="true"] .dot{border-radius:2px; animation:pulse 1.2s ease-in-out infinite}
+@keyframes pulse{50%{opacity:.35}}
+.rectime{font-family:var(--f-mono); font-variant-numeric:tabular-nums; color:var(--danger); font-weight:600}
+.clips{display:flex; flex-direction:column; gap:8px; margin-top:8px}
+.clips:empty{display:none}
+.clip{display:flex; align-items:center; gap:10px; flex-wrap:wrap; border:1px solid var(--line); border-radius:8px; padding:8px 10px; background:var(--bg)}
+.clip audio{flex:1 1 220px; min-width:0; height:36px}
+.clip .meta{font-size:13px; color:var(--muted); font-family:var(--f-mono)}
+.clip button{border:0; background:none; color:var(--danger); font-size:13px; cursor:pointer; padding:4px}
 .notetools{display:flex; gap:8px; flex-wrap:wrap; margin-top:8px}
 .learn{display:grid; grid-template-columns:1fr 1fr; gap:8px; margin-top:10px; padding:10px; border-radius:8px; background:var(--accent-soft)}
 .learn .learnbtns{grid-column:1/-1; display:flex; gap:8px}
@@ -234,6 +247,11 @@ h3{font-size:13px; text-transform:uppercase; letter-spacing:.07em; color:var(--m
     <h2 id="h-no">Notes pour le prothésiste</h2>
     <p class="sub">Caractérisation, forme, contacts, occlusion, état de surface…</p>
     <label class="f" for="notes" style="display:block"><textarea id="notes" placeholder="Ex. : 21 – translucidité incisale marquée, légers mamelons, état de surface proche de la 11."></textarea></label>
+    <div class="voice">
+      <button class="btn rec" id="btnRec" type="button" aria-pressed="false"><span class="dot"></span><span id="recLabel">Enregistrer une note vocale</span></button>
+      <span class="rectime" id="recTime" hidden>0:00</span>
+    </div>
+    <div class="clips" id="clips"></div>
     <div class="notetools">
       <button class="btn small" id="btnFix" type="button">Corriger la dictée</button>
       <button class="btn small" id="btnLearn" type="button">Apprendre une correction</button>
@@ -456,7 +474,7 @@ $('#btnNew').addEventListener('click',()=>{
     setTimeout(()=>{ delete $('#btnNew').dataset.armed; $('#btnNew').textContent='Nouveau bon'; },4000); return;
   }
   delete $('#btnNew').dataset.armed; $('#btnNew').textContent='Nouveau bon';
-  const keepLab=S.lab; S=blank(); S.lab=keepLab; save(); photos=[]; renderPhotos(); fillForm(); status(''); window.scrollTo({top:0});
+  const keepLab=S.lab; S=blank(); S.lab=keepLab; save(); photos=[]; renderPhotos(); clips.forEach(c=>URL.revokeObjectURL(c.url)); clips=[]; renderClips(); fillForm(); status(''); window.scrollTo({top:0});
 });
 
 /* ---------- Photos de teinte (en mémoire uniquement) ---------- */
@@ -488,6 +506,58 @@ function photoFiles(){
   const n=S.nom.trim().normalize('NFD').replace(/[̀-ͯ]/g,'').replace(/[^A-Za-z0-9]+/g,'_')||'patient';
   return photos.map((p,i)=>{ const ext=(p.file.name.split('.').pop()||'jpg').toLowerCase(); return new File([p.file], `Teinte_${n}_${i+1}.${ext}`, {type:p.file.type||'image/jpeg'}); });
 }
+
+/* ---------- Notes vocales (en mémoire uniquement) ---------- */
+let clips=[], rec=null, recTimer=null, recStart=0;
+const MAX_REC=5*60;
+const fmtDur=s=>`${Math.floor(s/60)}:${String(Math.floor(s%60)).padStart(2,'0')}`;
+function pickMime(){
+  if(!window.MediaRecorder||!MediaRecorder.isTypeSupported) return '';
+  return ['audio/mp4','audio/aac','audio/webm;codecs=opus','audio/webm'].find(t=>MediaRecorder.isTypeSupported(t))||'';
+}
+const extFor=type=>/mp4|aac|m4a/.test(type)?'m4a':/webm/.test(type)?'webm':/ogg/.test(type)?'ogg':'m4a';
+function renderClips(){
+  $('#clips').innerHTML=clips.map((c,i)=>`<div class="clip" data-i="${i}"><span class="meta">Note ${i+1} · ${fmtDur(c.dur)}</span>
+    <audio controls preload="metadata" src="${c.url}"></audio><button type="button" data-cliprm>Supprimer</button></div>`).join('');
+}
+function setRecUI(on){
+  $('#btnRec').setAttribute('aria-pressed', on);
+  $('#recLabel').textContent=on?'Arrêter l\'enregistrement':'Enregistrer une note vocale';
+  $('#recTime').hidden=!on; $('#recTime').textContent='0:00';
+}
+async function startRec(){
+  if(!navigator.mediaDevices||!navigator.mediaDevices.getUserMedia||!window.MediaRecorder){
+    status('L\'enregistrement audio n\'est pas disponible sur ce navigateur. Sur iPhone, utilisez Safari ou l\'icône de l\'écran d\'accueil.','err'); return;
+  }
+  let stream;
+  try{ stream=await navigator.mediaDevices.getUserMedia({audio:true}); }
+  catch(e){ status('Micro refusé. Autorisez l\'accès au micro pour ce site dans Réglages > Safari > Micro, puis réessayez.','err'); return; }
+  const mime=pickMime(), chunks=[];
+  try{ rec=mime?new MediaRecorder(stream,{mimeType:mime}):new MediaRecorder(stream); }
+  catch(e){ stream.getTracks().forEach(t=>t.stop()); status('Impossible de démarrer l\'enregistrement sur cet appareil.','err'); return; }
+  rec.ondataavailable=e=>{ if(e.data&&e.data.size) chunks.push(e.data); };
+  rec.onstop=()=>{
+    stream.getTracks().forEach(t=>t.stop()); clearInterval(recTimer);
+    const dur=(Date.now()-recStart)/1000, type=rec.mimeType||mime||'audio/mp4';
+    const blob=new Blob(chunks,{type});
+    rec=null; setRecUI(false);
+    if(blob.size<800||dur<0.8){ status('Enregistrement trop court, rien n\'a été gardé.','err'); return; }
+    clips.push({blob, type, dur, url:URL.createObjectURL(blob)}); renderClips();
+    status(`Note vocale de ${fmtDur(dur)} prête. Elle sera jointe au mail avec le PDF.`,'ok');
+  };
+  rec.start(1000); recStart=Date.now(); setRecUI(true); status('Enregistrement en cours…');
+  recTimer=setInterval(()=>{ const s=(Date.now()-recStart)/1000; $('#recTime').textContent=fmtDur(s); if(s>=MAX_REC&&rec) rec.stop(); },250);
+}
+$('#btnRec').addEventListener('click',()=>{ if(rec){ if(rec.state!=='inactive') rec.stop(); } else startRec(); });
+$('#clips').addEventListener('click',e=>{
+  if(!e.target.matches('[data-cliprm]')) return;
+  const i=+e.target.closest('.clip').dataset.i; URL.revokeObjectURL(clips[i].url); clips.splice(i,1); renderClips();
+});
+function clipFiles(){
+  const n=S.nom.trim().normalize('NFD').replace(/[̀-ͯ]/g,'').replace(/[^A-Za-z0-9]+/g,'_')||'patient';
+  return clips.map((c,i)=>new File([c.blob], `Note_vocale_${n}_${i+1}.${extFor(c.type)}`, {type:c.type.split(';')[0]}));
+}
+function clipsLine(){ return clips.length?`${clips.length} note${clips.length>1?'s':''} vocale${clips.length>1?'s':''} jointe${clips.length>1?'s':''} (${clips.map(c=>fmtDur(c.dur)).join(', ')})`:''; }
 
 /* ---------- Dictionnaire de corrections (local) ---------- */
 const DEFAULT_DICT=[
@@ -595,7 +665,7 @@ function logHist(){
 /* ---------- Contenu texte ---------- */
 function subject(){ return `Bon de commande - ${patient()||'patient'}${S.date?' - retour souhaité le '+fmtDate(S.date):''}`; }
 function shortBody(){
-  return `Bonjour,\n\nVeuillez trouver ci-joint le bon de commande pour ${patient()||'le patient'}${S.date?', avec un retour souhaité le '+fmtDate(S.date):''} (étape : ${S.etape.toLowerCase()})${photos.length?`, ainsi que ${photos.length} photo${photos.length>1?'s':''} de teinte en pleine résolution`:''}.\n\nBien cordialement,\n${cab.praticien}\n${cab.cabinet}${cab.tel?'\n'+cab.tel:''}`;
+  return `Bonjour,\n\nVeuillez trouver ci-joint le bon de commande pour ${patient()||'le patient'}${S.date?', avec un retour souhaité le '+fmtDate(S.date):''} (étape : ${S.etape.toLowerCase()})${photos.length?`, ainsi que ${photos.length} photo${photos.length>1?'s':''} de teinte en pleine résolution`:''}.${clips.length?`\n\nJe joins aussi ${clips.length>1?'des notes vocales':'une note vocale'} qui complète${clips.length>1?'nt':''} les consignes écrites.`:''}\n\nBien cordialement,\n${cab.praticien}\n${cab.cabinet}${cab.tel?'\n'+cab.tel:''}`;
 }
 function fullText(){
   const L=[];
@@ -607,6 +677,7 @@ function fullText(){
   if(!orderedTeeth().length) L.push('- (voir notes)');
   L.push('', 'TEINTE (VITA 3D-Master)', `Générale : ${S.teinte.principale||'-'} | Cervicale : ${S.teinte.cervicale||'-'} | Incisale : ${S.teinte.incisale||'-'} | Moignon : ${S.moignon||'-'}`);
   if(S.notes.trim()) L.push('', 'NOTES', S.notes.trim());
+  if(clips.length) L.push('', 'Note vocale enregistrée : non jointe à ce mail (envoyer avec « Envoyer le PDF »).');
   L.push('', cab.praticien, cab.cabinet, cab.adresse, cab.tel, cab.email);
   return L.filter((l,i,a)=>l!==undefined).join('\n').replace(/\n{3,}/g,'\n\n').trim();
 }
@@ -614,7 +685,8 @@ function validate(){
   fixNotes(); fixPrecs();
   if(!S.nom.trim()){ status('Indiquez le nom du patient.','err'); $('#nom').focus(); return false; }
   if(!lab().email){ status('Ce laboratoire n\'a pas d\'adresse email. Ajoutez-la dans Réglages.','err'); return false; }
-  if(!orderedTeeth().length && !S.notes.trim()){ status('Ajoutez au moins un élément sur le schéma ou une note.','err'); return false; }
+  if(rec){ status('Arrêtez l\'enregistrement vocal avant d\'envoyer.','err'); return false; }
+  if(!orderedTeeth().length && !S.notes.trim() && !clips.length){ status('Ajoutez au moins un élément sur le schéma ou une note.','err'); return false; }
   return true;
 }
 
@@ -711,8 +783,11 @@ function buildPdf(){
   }
 
   // Notes
-  if(S.notes.trim()){
+  if(S.notes.trim()||clips.length){
     section('Notes du praticien');
+    if(clips.length){ ensure(8); doc.setFillColor(...SOFT); doc.roundedRect(M, y-4, CW, 7.5, 1.5, 1.5, 'F');
+      doc.setFont('helvetica','bold'); doc.setFontSize(9.5); doc.setTextColor(...ACC);
+      doc.text(clipsLine().replace(/^./,c=>c.toUpperCase())+' - à écouter en complément de la note écrite.', M+3, y+0.8); y+=8; }
     doc.setFont('helvetica','normal'); doc.setFontSize(10.5); doc.setTextColor(...INK);
     doc.splitTextToSize(S.notes.trim(), CW).forEach(l=>{ ensure(5); doc.text(l, M, y); y+=5; });
   }
@@ -730,12 +805,16 @@ $('#btnShare').addEventListener('click', async ()=>{
   if(!validate()||!pdfReady()) return;
   const blob=buildPdf().output('blob');
   const file=new File([blob], fileName(), {type:'application/pdf'});
-  let files=[file, ...photoFiles()];
-  if(navigator.canShare && files.length>1 && !navigator.canShare({files})) files=[file];
-  if(navigator.canShare && navigator.canShare({files})){
+  const want=[file, ...clipFiles(), ...photoFiles()];
+  const can=f=>{ try{ return navigator.canShare({files:f}); }catch(e){ return false; } };
+  let files=want;
+  if(navigator.canShare && !can(files)) files=[file, ...clipFiles()];
+  if(navigator.canShare && !can(files)) files=[file];
+  const dropped=want.length-files.length;
+  if(navigator.canShare && can(files)){
     try{
       await navigator.share({files, title:subject(), text:shortBody()});
-      logHist(); status(`Partagé. Pensez à saisir ${lab().email} comme destinataire si Mail ne l'a pas proposé.`,'ok');
+      logHist(); status(`Partagé. Pensez à saisir ${lab().email} comme destinataire si Mail ne l'a pas proposé.${dropped?` Attention : ${dropped} pièce${dropped>1?'s':''} jointe${dropped>1?'s':''} n'${dropped>1?'ont':'a'} pas pu être ajoutée${dropped>1?'s':''}.`:''}`, dropped?'err':'ok');
     }catch(e){ if(e.name!=='AbortError') status('Le partage a échoué. Utilisez « Télécharger le PDF ».','err'); }
   } else {
     download(blob); logHist();
